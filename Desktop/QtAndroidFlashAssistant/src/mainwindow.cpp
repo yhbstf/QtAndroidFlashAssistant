@@ -1,0 +1,239 @@
+#include "mainwindow.h"
+#include "adbclient.h"
+#include "fastbootclient.h"
+
+#include <QComboBox>
+#include <QFileDialog>
+#include <QGridLayout>
+#include <QLabel>
+#include <QLineEdit>
+#include <QMessageBox>
+#include <QPushButton>
+#include <QTextEdit>
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QWidget>
+
+MainWindow::~MainWindow() = default;
+
+MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
+
+
+    m_adb = std::make_unique<ADBClient>();
+    m_fb  = std::make_unique<FastbootClient>();
+
+    connect(m_adb.get(), &ADBClient::logLine, this, &MainWindow::appendLog);
+    connect(m_fb.get(),  &FastbootClient::logLine, this, &MainWindow::appendLog);
+
+    setupUi();
+    setWindowIcon(QIcon(":/icons/android.png"));
+}
+
+void MainWindow::setupUi() {
+    auto* central = new QWidget(this);
+    auto* root = new QVBoxLayout(central);
+
+    // 顶部：模式 + 设备选择 + 刷新 + 状态
+    auto* top = new QHBoxLayout();
+    m_modeCombo = new QComboBox(this);
+    m_modeCombo->addItems({"ADB", "Fastboot"});
+    top->addWidget(new QLabel("模式:")); top->addWidget(m_modeCombo);
+
+    m_deviceCombo = new QComboBox(this);
+    top->addWidget(new QLabel("设备:")); top->addWidget(m_deviceCombo, 1);
+
+    auto* btnRefresh = new QPushButton("刷新设备");
+    connect(btnRefresh, &QPushButton::clicked, this, &MainWindow::onRefreshDevices);
+    top->addWidget(btnRefresh);
+
+    m_stateLabel = new QLabel("未检测");
+    top->addWidget(m_stateLabel);
+
+    root->addLayout(top);
+
+    // 操作区
+    auto* ops = new QGridLayout();
+    int r = 0;
+
+    auto* btnInfo = new QPushButton("读取信息");
+    connect(btnInfo, &QPushButton::clicked, this, &MainWindow::onReadInfo);
+    ops->addWidget(btnInfo, r, 0);
+
+    auto* btnR1 = new QPushButton("重启 System");
+    connect(btnR1, &QPushButton::clicked, this, &MainWindow::onRebootSystem);
+    ops->addWidget(btnR1, r, 1);
+
+    auto* btnR2 = new QPushButton("重启 Recovery");
+    connect(btnR2, &QPushButton::clicked, this, &MainWindow::onRebootRecovery);
+    ops->addWidget(btnR2, r, 2);
+
+    auto* btnR3 = new QPushButton("重启 Bootloader");
+    connect(btnR3, &QPushButton::clicked, this, &MainWindow::onRebootBootloader);
+    ops->addWidget(btnR3, r, 3);
+
+    r++;
+
+    auto* btnInstall = new QPushButton("安装 APK...");
+    connect(btnInstall, &QPushButton::clicked, this, &MainWindow::onInstallApk);
+    ops->addWidget(btnInstall, r, 0, 1, 2);
+
+    auto* btnSideload = new QPushButton("Recovery 刷包 (sideload)...");
+    connect(btnSideload, &QPushButton::clicked, this, &MainWindow::onSideloadZip);
+    ops->addWidget(btnSideload, r, 2, 1, 2);
+
+    r++;
+
+    m_partEdit = new QLineEdit(this); m_partEdit->setPlaceholderText("分区名，如: boot / recovery / system");
+    auto* btnFlash = new QPushButton("Fastboot 刷分区 (选择镜像)...");
+    connect(btnFlash, &QPushButton::clicked, this, &MainWindow::onFlashPartition);
+    ops->addWidget(m_partEdit, r, 0, 1, 2);
+    ops->addWidget(btnFlash, r, 2, 1, 2);
+
+    r++;
+
+    auto* btnUnlock = new QPushButton("OEM 解锁 (危险)");
+    connect(btnUnlock, &QPushButton::clicked, this, &MainWindow::onUnlock);
+    ops->addWidget(btnUnlock, r, 0, 1, 2);
+
+    auto* btnLock = new QPushButton("OEM 上锁");
+    connect(btnLock, &QPushButton::clicked, this, &MainWindow::onLock);
+    ops->addWidget(btnLock, r, 2, 1, 2);
+
+    root->addLayout(ops);
+
+    // 日志
+    m_log = new QTextEdit(this); m_log->setReadOnly(true);
+    root->addWidget(m_log, 1);
+
+    setCentralWidget(central);
+    setWindowTitle("Android Flash Assistant");
+    resize(980, 640);
+
+    onRefreshDevices();
+}
+
+QString MainWindow::currentSerial() const {
+    return m_deviceCombo->currentText().trimmed();
+}
+
+void MainWindow::infoBox(const QString& title, const QString& text, bool isWarn) {
+    if (isWarn) QMessageBox::warning(this, title, text);
+    else QMessageBox::information(this, title, text);
+}
+
+void MainWindow::appendLog(const QString& line) {
+    m_log->append(line);
+}
+
+void MainWindow::onRefreshDevices() {
+    m_deviceCombo->clear();
+    if (m_modeCombo->currentText() == "ADB") {
+        const auto list = m_adb->devices();
+        if (list.isEmpty()) { m_stateLabel->setText("ADB: 未发现设备"); }
+        else { m_stateLabel->setText(QString("ADB: %1 台").arg(list.size())); m_deviceCombo->addItems(list); }
+    } else {
+        const auto list = m_fb->devices();
+        if (list.isEmpty()) { m_stateLabel->setText("Fastboot: 未发现设备"); }
+        else { m_stateLabel->setText(QString("Fastboot: %1 台").arg(list.size())); m_deviceCombo->addItems(list); }
+    }
+}
+
+void MainWindow::onReadInfo() {
+    if (m_modeCombo->currentText() == "ADB") {
+        const auto ser = currentSerial(); if (ser.isEmpty()) return;
+        QString model = m_adb->getProp(ser, "ro.product.model");
+        QString brand = m_adb->getProp(ser, "ro.product.brand");
+        QString release = m_adb->getProp(ser, "ro.build.version.release");
+        QString sdk = m_adb->getProp(ser, "ro.build.version.sdk");
+        QString state = m_adb->getState(ser);
+        appendLog(QString("[ADB] %1 %2 | Android %3 (SDK %4) | state=%5")
+                  .arg(brand, model, release, sdk, state));
+    } else {
+        const auto ser = currentSerial(); if (ser.isEmpty()) return;
+        QString product = m_fb->getVar(ser, "product");
+        QString slotcnt = m_fb->getVar(ser, "slot-count");
+        QString ability = m_fb->getVar(ser, "unlock_ability");
+        appendLog(QString("[FB] product=%1, slot-count=%2, unlock_ability=%3")
+                  .arg(product, slotcnt, ability));
+    }
+}
+
+void MainWindow::onRebootSystem() {
+    if (m_modeCombo->currentText() == "ADB") {
+        const auto ser = currentSerial(); if (ser.isEmpty()) return;
+        m_adb->reboot(ser, "");
+    } else {
+        const auto ser = currentSerial(); if (ser.isEmpty()) return;
+        m_fb->reboot(ser);
+    }
+}
+
+void MainWindow::onRebootRecovery() {
+    if (m_modeCombo->currentText() == "ADB") {
+        const auto ser = currentSerial(); if (ser.isEmpty()) return;
+        m_adb->reboot(ser, "recovery");
+    } else {
+        const auto ser = currentSerial(); if (ser.isEmpty()) return;
+        m_fb->rebootRecovery(ser); // 并非所有设备支持
+    }
+}
+
+void MainWindow::onRebootBootloader() {
+    if (m_modeCombo->currentText() == "ADB") {
+        const auto ser = currentSerial(); if (ser.isEmpty()) return;
+        m_adb->reboot(ser, "bootloader");
+    } else {
+        infoBox("提示", "已处于 Fastboot 模式或请手动进入。", false);
+    }
+}
+
+void MainWindow::onInstallApk() {
+    if (m_modeCombo->currentText() != "ADB") { infoBox("提示", "请在 ADB 模式下使用安装 APK。", true); return; }
+    const auto ser = currentSerial(); if (ser.isEmpty()) return;
+    const QString f = QFileDialog::getOpenFileName(this, "选择 APK", QString(), "APK (*.apk)");
+    if (f.isEmpty()) return;
+    int code = m_adb->installApk(ser, f);
+    appendLog(QString("安装 APK 退出码: %1").arg(code));
+}
+
+void MainWindow::onSideloadZip() {
+    if (m_modeCombo->currentText() != "ADB") { infoBox("提示", "请在 ADB 模式下进行 sideload。", true); return; }
+    const QString f = QFileDialog::getOpenFileName(this, "选择刷机包 (zip)", QString(), "ZIP (*.zip)");
+    if (f.isEmpty()) return;
+    infoBox("操作提示", "请先将设备进入 Recovery，并选择 ADB sideload 菜单后再继续。", false);
+    int code = m_adb->sideload(f, 0); // 可能耗时较长
+    appendLog(QString("sideload 退出码: %1").arg(code));
+}
+
+void MainWindow::onFlashPartition() {
+    if (m_modeCombo->currentText() != "Fastboot") { infoBox("提示", "请在 Fastboot 模式下刷分区。", true); return; }
+    const auto ser = currentSerial(); if (ser.isEmpty()) return;
+    const QString part = m_partEdit->text().trimmed();
+    if (part.isEmpty()) { infoBox("错误", "请填写分区名。", true); return; }
+    const QString f = QFileDialog::getOpenFileName(this, "选择镜像 (img)", QString(), "Image (*.img *.bin)");
+    if (f.isEmpty()) return;
+    if (QMessageBox::question(this, "确认",
+        QString("确认刷写分区 '%1' ?\n镜像: %2").arg(part, f)) != QMessageBox::Yes) return;
+    int code = m_fb->flashPartition(ser, part, f);
+    appendLog(QString("flash %1 退出码: %2").arg(part).arg(code));
+}
+
+void MainWindow::onUnlock() {
+    if (m_modeCombo->currentText() != "Fastboot") { infoBox("提示", "请在 Fastboot 模式下进行。", true); return; }
+    if (QMessageBox::warning(this, "危险操作",
+        "OEM 解锁将清除全部数据并可能失去保修，确定继续吗？",
+        QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes) return;
+    const auto ser = currentSerial(); if (ser.isEmpty()) return;
+    int code = m_fb->flashingUnlock(ser);
+    appendLog(QString("flashing unlock 退出码: %1").arg(code));
+}
+
+void MainWindow::onLock() {
+    if (m_modeCombo->currentText() != "Fastboot") { infoBox("提示", "请在 Fastboot 模式下进行。", true); return; }
+    if (QMessageBox::warning(this, "注意",
+        "上锁前请确认系统为官方固件且可正常启动，否则可能导致无法开机。",
+        QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes) return;
+    const auto ser = currentSerial(); if (ser.isEmpty()) return;
+    int code = m_fb->flashingLock(ser);
+    appendLog(QString("flashing lock 退出码: %1").arg(code));
+}

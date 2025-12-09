@@ -9,6 +9,7 @@ RCC_DIR = build/rcc
 UI_DIR = build/ui
 
 SOURCES += \
+    new001.cpp \
     src/main.cpp \
     src/mainwindow.cpp \
     src/processrunner.cpp \
@@ -16,6 +17,7 @@ SOURCES += \
     src/fastbootclient.cpp
 
 HEADERS += \
+    new001.h \
     src/mainwindow.h \
     src/processrunner.h \
     src/adbclient.h \
